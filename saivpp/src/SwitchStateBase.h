@@ -66,6 +66,12 @@ typedef struct vpp_ace_cntr_info_ {
     uint32_t ace_index;
 } vpp_ace_cntr_info_t;
 
+typedef struct platform_bond_info_ {
+    uint32_t sw_if_index;
+    uint32_t id;
+    bool first_member_added;
+} platform_bond_info_t;
+
 namespace saivpp
 {
     class SwitchStateBase:
@@ -1319,7 +1325,10 @@ namespace saivpp
 	    void populate_if_mapping();
 	    const char *tap_to_hwif_name(const char *name);
             const char *hwif_to_tap_name(const char *name);
-            uint32_t lag_to_bond_if_idx (const sai_object_id_t lag_id);
+            sai_status_t get_lag_bond_info(
+                _In_ const sai_object_id_t lag_id,
+                _Out_ platform_bond_info_t &bond_info);
+            uint32_t find_bond_id();
             int remove_lag_to_bond_entry (const sai_object_id_t lag_id);
 
             void vppProcessEvents ();
@@ -1332,7 +1341,7 @@ namespace saivpp
             bool m_run_vpp_events_thread = true;
             bool VppEventsThreadStarted = false;
 	    std::shared_ptr<std::thread> m_vpp_thread;
-	    std::map<sai_object_id_t, uint32_t> m_lag_bond_map;
+	    std::map<sai_object_id_t, platform_bond_info_t> m_lag_bond_map;
 
         private:
             static int currentMaxInstance;

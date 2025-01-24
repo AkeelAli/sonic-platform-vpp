@@ -364,6 +364,15 @@ bool SwitchStateBase::vpp_get_hwif_name (
       _In_ uint32_t vlan_id,
       _Out_ std::string& ifname)
 {
+
+    // TODO: Handle if it is a portchannel (ideally should update tapnamefromportid and tap_to_hwif_name, etc. but having problems there...)
+    if (objectTypeQuery(object_id) == SAI_OBJECT_TYPE_LAG) {
+        platform_bond_info_t bond_info;
+        CHECK_STATUS(get_lag_bond_info(object_id, bond_info));
+        ifname = std::string("BondEthernet") + std::to_string(bond_info.id);
+        return true;
+    }
+
     std::string if_name;
     bool found = getTapNameFromPortId(object_id, if_name);
 
@@ -980,10 +989,17 @@ sai_status_t SwitchStateBase::vpp_add_del_intf_ip_addr_norif (
     char hw_subifname[32];
     char hw_bviifname[32];
     const char *hw_ifname;
+    std::string portchannel_prefix = "PortChannel";
+    char hw_bondifname[32];
     if (full_if_name.compare(0, vlan_prefix.length(), vlan_prefix) == 0)
     {
        snprintf(hw_bviifname, sizeof(hw_bviifname), "%s%d","bvi",vlan_id);
        hw_ifname = hw_bviifname;
+    } else if (full_if_name.compare(0, portchannel_prefix.length(), portchannel_prefix) == 0) {
+        uint32_t bond_id = std::stoi(full_if_name.substr(portchannel_prefix.length()));
+        snprintf(hw_bondifname, sizeof(hw_bondifname), "BondEthernet%d", bond_id);
+        hw_ifname = hw_bondifname;
+        SWSS_LOG_NOTICE("Setting ip on bond hw_ifname %s", hw_ifname);
     } else {
        hwifname = tap_to_hwif_name(if_name.c_str());
        if (vlan_id) {
@@ -1317,6 +1333,7 @@ sai_status_t SwitchStateBase::vpp_get_router_intf_name (
         return SAI_STATUS_SUCCESS;
     }
 
+    // TODO this funciton does not appear to be used... so ignored for LAG handling for now
     if (ot != SAI_OBJECT_TYPE_PORT)
     {
         SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT but is: %s",
@@ -1511,9 +1528,9 @@ sai_status_t SwitchStateBase::vpp_create_router_interface(
         return SAI_STATUS_SUCCESS;
     }
 
-    if (ot != SAI_OBJECT_TYPE_PORT)
+    if (ot != SAI_OBJECT_TYPE_PORT && ot != SAI_OBJECT_TYPE_LAG)
     {
-        SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT but is: %s",
+        SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT or LAG but is: %s",
                 sai_serialize_object_id(obj_id).c_str(),
                 sai_serialize_object_type(ot).c_str());
 
@@ -1533,8 +1550,18 @@ sai_status_t SwitchStateBase::vpp_create_router_interface(
 	vlan_id = attr_vlan_id->value.u16;
     }
 
+    // TODO LAG handler
     std::string if_name;
-    bool found = getTapNameFromPortId(obj_id, if_name);
+    bool found = false;
+//     if (ot == SAI_OBJECT_TYPE_LAG) {
+//         platform_bond_info_t bond_info;
+//         CHECK_STATUS(get_lag_bond_info(obj_id, bond_info));
+//         if_name = std::string("PortChannel") + std::to_string(bond_info.id);
+//         found = true;
+//     } else {
+        found = getTapNameFromPortId(obj_id, if_name);
+//     }
+
     if (found == false)
     {
 	SWSS_LOG_ERROR("host interface for port id %s not found", sai_serialize_object_id(obj_id).c_str());
@@ -1545,6 +1572,7 @@ sai_status_t SwitchStateBase::vpp_create_router_interface(
     const char *linux_ifname;
     char host_subifname[32];
 
+    // TODO add support for LAG subintf (tap_to_hwif_name is problematic)
     if (attr_type->value.s32 == SAI_ROUTER_INTERFACE_TYPE_SUB_PORT)
     {
 	snprintf(host_subifname, sizeof(host_subifname), "%s.%u", dev, vlan_id);
@@ -1559,6 +1587,9 @@ sai_status_t SwitchStateBase::vpp_create_router_interface(
     } else {
 	linux_ifname = dev;
     }
+    
+
+    // TODO add vrf for LAG 
     sai_object_id_t vrf_obj_id = 0;
 
     auto attr_vrf_id = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_VIRTUAL_ROUTER_ID, attr_count, attr_list);
@@ -1579,6 +1610,8 @@ sai_status_t SwitchStateBase::vpp_create_router_interface(
     if (ret == 0 && vrf_id != 0) {
 	set_interface_vrf(tap_to_hwif_name(dev), vlan_id, vrf_id, false);
     }
+
+    // Below is exact same as in update call (refactor)
     auto attr_type_mtu = sai_metadata_get_attr_by_id(SAI_ROUTER_INTERFACE_ATTR_MTU, attr_count, attr_list);
 
     if (attr_type_mtu != NULL)
@@ -1650,9 +1683,9 @@ sai_status_t SwitchStateBase::vpp_update_router_interface(
         return SAI_STATUS_SUCCESS;
     }
 
-    if (ot != SAI_OBJECT_TYPE_PORT)
+    if (ot != SAI_OBJECT_TYPE_PORT && ot != SAI_OBJECT_TYPE_LAG)
     {
-        SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT but is: %s",
+        SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT or LAG but is: %s",
                 sai_serialize_object_id(obj_id).c_str(),
                 sai_serialize_object_type(ot).c_str());
 
@@ -1780,6 +1813,7 @@ sai_status_t SwitchStateBase::vpp_remove_router_interface(sai_object_id_t rif_id
         return SAI_STATUS_SUCCESS;
     }
 
+    // TODO add LAG handler for subintf and VRF delete below
     if (ot != SAI_OBJECT_TYPE_PORT)
     {
         SWSS_LOG_ERROR("SAI_ROUTER_INTERFACE_ATTR_PORT_ID=%s expected to be PORT but is: %s",

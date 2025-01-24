@@ -3417,7 +3417,7 @@ int create_bond_member(uint32_t bond_sw_if_index, const char *hwif_name, bool is
     int ret;
 
 
-    SAIVPP_WARN("Adding member to bond interface: \n");
+    SAIVPP_WARN("Adding member %s to bond interface %u \n", hwif_name, bond_sw_if_index);
     VPP_LOCK();
 
     __plugin_msg_base = bond_msg_id_base;
@@ -3456,6 +3456,7 @@ int create_bond_member(uint32_t bond_sw_if_index, const char *hwif_name, bool is
 const char * vpp_get_swif_name (const u32 swif_idx)
 {
     vat_main_t *vam = &vat_main;
+    // TODO may need to lock here, though I tried and created deadlock...
     return get_swif_name(vam, swif_idx);
 }
 
