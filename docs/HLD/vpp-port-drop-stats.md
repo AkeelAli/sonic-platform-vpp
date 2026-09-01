@@ -9,7 +9,7 @@
 5. [Design Details](#design-details)
 6. [Code References](#code-references)
 7. [Expected Behavior](#expected-behavior)
-8. [Risks](#risks)
+8. [Appendix](#appendix)
 
 ## Revisions
 
@@ -39,8 +39,8 @@ per-interface `drops` counter (`/interfaces/<if>/drops`,
 `sw_if_index[VLIB_RX]`. sairedis maps this `drops` counter to
 `SAI_PORT_STAT_IF_IN_DISCARDS` (RX_DRP in `show interfaces counters`).
 
-Two forwarding features rewrite `sw_if_index[VLIB_RX]` before a packet can reach
-the drop path:
+Two forwarding features in VPP rewrite the RX interface index
+`sw_if_index[VLIB_RX]` before a packet can reach the drop path:
 
 1. **LAG / bonding** — `bond_sw_if_idx_rewrite()` replaces the member's RX index
    with the bond interface's index.
@@ -48,28 +48,17 @@ the drop path:
    the bridge domain's BVI (Bridge Virtual Interface) to route out of the bridge
    domain.
 
-As a result, a drop on a LAG member or a VLAN (bridge-domain) member is counted
+As a result, a drop on a LAG member or a VLAN member is counted
 against the LAG or BVI, not the physical member, so the ingress port shows zero
-drops — losing per-port visibility exactly in the aggregated topologies where it
-matters most. The original port is unrecoverable at drop time (a LAG
-load-balances across members, a BVI has many members), so it must be captured at
-the rewrite and carried on the buffer to the drop node.
+drops. This gap is exercised by the sonic-mgmt drop-counter tests
+(`tests/drop_packets/test_drop_counters.py`), whose tests consequently fail when
+parametrized over `port_channel_members` and `vlan_members` in the `t1-lag-vpp`
+and `t0-vpp` topologies.
 
-This gap is exercised by the sonic-mgmt drop-counter tests
-(`tests/drop_packets/test_drop_counters.py`), whose `tx_dut_ports` fixture
-parametrizes the ingress port over `port_channel_members`, `vlan_members`, and
-`rif_members`. Counting LAG-member drops against the member covers the
-`port_channel_members` case on the `t1-lag-vpp` topology, and counting SVI/BVI
-member drops against the member covers the `vlan_members` case on the `t0-vpp`
-topology. The `rif_members` case needs no special handling, since a plain L3 RIF
-port has no RX rewrite.
-
-A previous iteration stored the index in `opaque2` (VPP's second per-buffer
-scratch metadata area) and treated `0` as "not set", zeroing it in `bond_input`.
-That was fragile: `opaque2` is not reset per packet, so packets that skip
-`bond_input` could read a stale non-zero value; `0` is also a valid `sw_if_index`
-(`local0`); and the `member -> LAG -> BVI` chain recorded the LAG instead of the
-physical member.
+To address this gap, the original port must be captured at the rewrite and
+carried on the packet buffer to the drop node, where the counter increment can
+then be applied against the original physical member port in addition to the
+rewritten LAG or BVI interface.
 
 ## Solution
 
@@ -127,7 +116,7 @@ if (!(b0->flags & VNET_BUFFER_F_ORIG_RX_SW_IF_VALID))
 
 ### Second increment at drop (`src/vnet/interface_output.c`)
 
-In `interface_drop_punt()`, after the existing super-interface increment, walk the
+In `interface_drop_punt()`, after the existing LAG/BVI interface increment, walk the
 buffers just counted and, gated on the flag, increment the original member port:
 
 ```c
@@ -166,9 +155,9 @@ The implementation is the VPP dataplane patch
 ## Expected Behavior
 
 1. A drop on a LAG member port is counted on both the LAG and the physical
-   member port (`SAI_PORT_STAT_IF_IN_DISCARDS`).
-2. A drop on a VLAN (bridge-domain) member port is counted on both the BVI and
-   the physical member port.
+   member port.
+2. A drop on a VLAN member port is counted on both the BVI and the physical
+   member port.
 3. For a `member -> LAG -> BVI` chain, the drop is counted against the physical
    member, not the intermediate LAG.
 4. Traffic on ports whose RX index is not rewritten is counted exactly as before.
@@ -178,14 +167,24 @@ The implementation is the VPP dataplane patch
    `tests/drop_packets/test_drop_counters.py`; the `rif_members` case is
    unaffected.
 
-## Risks
+## Appendix
 
-The main risk with this solution is that it relies on non-upstream buffer state — a scarce
-per-buffer flag bit (bit 27, formerly `AVAIL9`) plus a `u32` in `opaque2` — so it
-is fragile across VPP rebases. It permanently consumes one of VPP's limited
-`AVAIL` flag bits and must be re-checked on every rebase: if upstream later
-assigns bit 27, the patch has to move to another free bit. The flag also guards
-only against stale reads across packets, not against another node overwriting the
-`orig_rx_sw_if_index` word in `opaque2` for the same packet between the RX rewrite
-and the drop; that word is carved from the tail `unused[]` words that nothing
-touches today, so that case is low risk.
+A previous version of this patch only stored the index in `opaque2` and treated
+`0` as "not set", zeroing it in `bond_input`. That was fragile: `opaque2` is not
+reset per packet, so packets that skip `bond_input` could read a stale non-zero
+value. It was also costlier on the fast path: since `opaque2` is not reset per
+buffer allocation, the sentinel had to be written on every packet to establish a
+known "not set" state (and to be fully correct would have needed a reset on every
+path reaching the drop node, not just `bond_input`). The current design (buffer
+flag plus a dedicated `opaque2` word) addresses those issues — `b->flags` is
+already reset on every buffer allocation, so per-packet validity comes for free.
+
+This approach however has the disadvantage that it relies on non-upstream buffer
+state — a scarce per-buffer flag bit (bit 27, formerly `AVAIL9`) plus a `u32` in
+`opaque2` — so it is fragile across VPP rebases. It permanently consumes one of
+VPP's limited `AVAIL` flag bits and must be re-checked on every rebase:
+if upstream later assigns bit 27, the patch has to move to another free bit.
+The flag also guards only against stale reads across packets, not against another
+node overwriting the `orig_rx_sw_if_index` word in `opaque2` for the same packet
+between the RX rewrite and the drop; that word is carved from the tail `unused[]`
+words that nothing touches today, so that case is low risk.
